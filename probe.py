@@ -20,14 +20,12 @@ from sklearn.preprocessing import StandardScaler
 class HallucinationProbe(nn.Module):
     """Binary classifier that detects hallucinations from hidden-state features.
 
-    Extends ``torch.nn.Module``; the default architecture is a single
-    hidden-layer MLP with ``StandardScaler`` pre-processing.  The network is
-    built lazily in ``fit()`` once the feature dimension is known.
+    Uses ``StandardScaler`` preprocessing and a compact regularized MLP.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self._net: nn.Sequential | None = None  # built lazily in fit()
+        self._net: nn.Sequential | None = None
         self._scaler = StandardScaler()
         self._threshold: float = 0.5  # tuned by fit_hyperparameters()
 
@@ -35,30 +33,18 @@ class HallucinationProbe(nn.Module):
     # STUDENT: Replace or extend the network definition below.
     # ------------------------------------------------------------------
     def _build_network(self, input_dim: int) -> None:
-        """Instantiate the network layers.
-
-        Called once at the start of ``fit()`` when ``input_dim`` is known.
-
-        Args:
-            input_dim: Feature vector dimensionality.
-        """
+        """Instantiate a compact MLP with dropout regularization."""
         self._net = nn.Sequential(
-            nn.Linear(input_dim, 256),
+            nn.Linear(input_dim, 128),
             nn.ReLU(),
-            nn.Linear(256, 1),
+            nn.Dropout(p=0.35),
+            nn.Linear(128, 1),
         )
 
     # ------------------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass — returns raw logits of shape ``(n_samples,)``.
-
-        Args:
-            x: Float tensor of shape ``(n_samples, feature_dim)``.
-
-        Returns:
-            1-D tensor of raw (pre-sigmoid) logits.
-        """
+        """Forward pass — returns raw logits of shape ``(n_samples,)``."""
         if self._net is None:
             raise RuntimeError(
                 "Network has not been built yet. Call fit() before forward()."
@@ -68,8 +54,8 @@ class HallucinationProbe(nn.Module):
     def fit(self, X: np.ndarray, y: np.ndarray) -> "HallucinationProbe":
         """Train the probe on labelled feature vectors.
 
-        Scales features with ``StandardScaler``, builds the network if needed,
-        and optimises with Adam + ``BCEWithLogitsLoss``.
+        Scales features with ``StandardScaler`` and optimises a regularized
+        MLP with AdamW + BCEWithLogitsLoss.
 
         Args:
             X: Feature matrix of shape ``(n_samples, feature_dim)``.
@@ -92,19 +78,19 @@ class HallucinationProbe(nn.Module):
         pos_weight = torch.tensor([n_neg / max(n_pos, 1)], dtype=torch.float32)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-        # ------------------------------------------------------------------
-        # STUDENT: Replace or extend the training loop below.
-        # ------------------------------------------------------------------
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=8e-4,
+            weight_decay=2e-3,
+        )
 
         self.train()
-        for _ in range(200):
+        for _ in range(60):
             optimizer.zero_grad()
             logits = self(X_t)
             loss = criterion(logits, y_t)
             loss.backward()
             optimizer.step()
-        # ------------------------------------------------------------------
 
         self.eval()
         return self
