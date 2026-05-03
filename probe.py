@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.metrics import f1_score
+from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 
 
@@ -112,7 +112,7 @@ class HallucinationProbe(nn.Module):
     def fit_hyperparameters(
         self, X_val: np.ndarray, y_val: np.ndarray
     ) -> "HallucinationProbe":
-        """Tune the decision threshold on a validation set to maximise F1.
+        """Tune the decision threshold on a validation set to maximise accuracy.
 
         The chosen threshold is stored in ``self._threshold`` and used by
         subsequent ``predict`` calls.  Call this after ``fit`` and before
@@ -133,12 +133,12 @@ class HallucinationProbe(nn.Module):
         candidates = np.unique(np.concatenate([probs, np.linspace(0.0, 1.0, 101)]))
 
         best_threshold = 0.5
-        best_f1 = -1.0
+        best_acc = -1.0
         for t in candidates:
             y_pred_t = (probs >= t).astype(int)
-            score = f1_score(y_val, y_pred_t, zero_division=0)
-            if score > best_f1:
-                best_f1 = score
+            score = accuracy_score(y_val, y_pred_t)
+            if score > best_acc:
+                best_acc = score
                 best_threshold = float(t)
 
         self._threshold = best_threshold
