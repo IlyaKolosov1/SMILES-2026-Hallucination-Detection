@@ -1,11 +1,5 @@
 """
-probe.py — Hallucination probe classifier (student-implemented).
-
-Implements ``HallucinationProbe``, a binary MLP that classifies feature
-vectors as truthful (0) or hallucinated (1).  Called from ``solution.py``
-via ``evaluate.run_evaluation``.  All four public methods (``fit``,
-``fit_hyperparameters``, ``predict``, ``predict_proba``) must be implemented
-and their signatures must not change.
+probe.py — hardcoded probe pipeline.
 """
 
 from __future__ import annotations
@@ -13,152 +7,94 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+PCA_COMPONENTS = 64
+LOGREG_C = 0.1
+LOGREG_SEED = 42
 
 
 class HallucinationProbe(nn.Module):
-    """Binary classifier that detects hallucinations from hidden-state features.
-
-    Uses ``StandardScaler`` preprocessing and a compact regularized MLP.
-    """
+    """Simple fixed probe: StandardScaler -> PCA -> LogisticRegression."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._net: nn.Sequential | None = None
-        self._scaler = StandardScaler()
-        self._threshold: float = 0.5  # tuned by fit_hyperparameters()
+        self._pipeline: Pipeline | None = None
+        self._threshold: float = 0.5
 
-    # ------------------------------------------------------------------
-    # STUDENT: Replace or extend the network definition below.
-    # ------------------------------------------------------------------
-    def _build_network(self, input_dim: int) -> None:
-        """Instantiate a compact MLP with dropout regularization."""
-        self._net = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(p=0.35),
-            nn.Linear(128, 1),
-        )
+    @staticmethod
+    def _as_2d_float(X: np.ndarray) -> np.ndarray:
+        X_arr = np.asarray(X, dtype=np.float32)
+        if X_arr.ndim == 1:
+            X_arr = X_arr.reshape(1, -1)
+        return np.nan_to_num(X_arr, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # ------------------------------------------------------------------
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass — returns raw logits of shape ``(n_samples,)``."""
-        if self._net is None:
-            raise RuntimeError(
-                "Network has not been built yet. Call fit() before forward()."
-            )
-        return self._net(x).squeeze(-1)
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "HallucinationProbe":
-        """Train the probe on labelled feature vectors.
-
-        Scales features with ``StandardScaler`` and optimises a regularized
-        MLP with AdamW + BCEWithLogitsLoss.
-
-        Args:
-            X: Feature matrix of shape ``(n_samples, feature_dim)``.
-            y: Integer label vector of shape ``(n_samples,)``; 0 = truthful,
-               1 = hallucinated.
-
-        Returns:
-            ``self`` (for method chaining).
-        """
-        X_scaled = self._scaler.fit_transform(X)
-
-        self._build_network(X_scaled.shape[1])
-
-        X_t = torch.from_numpy(X_scaled).float()
-        y_t = torch.from_numpy(y.astype(np.float32))
-
-        # Weight positive examples by neg/pos ratio to handle class imbalance.
-        n_pos = int(y.sum())
-        n_neg = len(y) - n_pos
-        pos_weight = torch.tensor([n_neg / max(n_pos, 1)], dtype=torch.float32)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=8e-4,
-            weight_decay=2e-3,
-        )
-
-        self.train()
-        for _ in range(60):
-            optimizer.zero_grad()
-            logits = self(X_t)
-            loss = criterion(logits, y_t)
-            loss.backward()
-            optimizer.step()
-
-        self.eval()
-        return self
-
-    def fit_hyperparameters(
-        self, X_val: np.ndarray, y_val: np.ndarray
-    ) -> "HallucinationProbe":
-        """Tune the decision threshold on a validation set to maximise accuracy.
-
-        The chosen threshold is stored in ``self._threshold`` and used by
-        subsequent ``predict`` calls.  Call this after ``fit`` and before
-        ``predict``.
-
-        Args:
-            X_val: Validation feature matrix of shape
-                   ``(n_val_samples, feature_dim)``.
-            y_val: Integer label vector of shape ``(n_val_samples,)``;
-                   0 = truthful, 1 = hallucinated.
-
-        Returns:
-            ``self`` (for method chaining).
-        """
-        probs = self.predict_proba(X_val)[:, 1]
-
-        # Candidate thresholds: unique predicted probabilities plus a coarse grid.
-        candidates = np.unique(np.concatenate([probs, np.linspace(0.0, 1.0, 101)]))
-
+    @staticmethod
+    def _best_threshold(probs: np.ndarray, y: np.ndarray) -> float:
+        candidates = np.linspace(0.10, 0.90, 81)
         best_threshold = 0.5
         best_acc = -1.0
-        for t in candidates:
-            y_pred_t = (probs >= t).astype(int)
-            score = accuracy_score(y_val, y_pred_t)
-            if score > best_acc:
-                best_acc = score
-                best_threshold = float(t)
+        for threshold in candidates:
+            acc = accuracy_score(y, (probs >= threshold).astype(int))
+            if acc > best_acc + 1e-12:
+                best_acc = acc
+                best_threshold = float(threshold)
+            elif np.isclose(acc, best_acc) and abs(threshold - 0.5) < abs(best_threshold - 0.5):
+                best_threshold = float(threshold)
+        return best_threshold
 
-        self._threshold = best_threshold
+    def _build_pipeline(self, X: np.ndarray) -> Pipeline:
+        max_components = min(X.shape[0] - 1, X.shape[1], PCA_COMPONENTS)
+        steps: list[tuple[str, object]] = [("scaler", StandardScaler())]
+        if max_components >= 2:
+            steps.append(("pca", PCA(n_components=int(max_components), svd_solver="auto", random_state=LOGREG_SEED)))
+        steps.append(
+            (
+                "logreg",
+                LogisticRegression(
+                    C=LOGREG_C,
+                    solver="liblinear",
+                    class_weight="balanced",
+                    max_iter=3000,
+                    random_state=LOGREG_SEED,
+                ),
+            )
+        )
+        return Pipeline(steps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        probs = self.predict_proba(x.detach().cpu().numpy())[:, 1]
+        probs = np.clip(probs, 1e-6, 1.0 - 1e-6)
+        logits = np.log(probs / (1.0 - probs))
+        return torch.from_numpy(logits).to(dtype=x.dtype, device=x.device)
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "HallucinationProbe":
+        X_arr = self._as_2d_float(X)
+        y_arr = np.asarray(y).astype(int)
+        self._pipeline = self._build_pipeline(X_arr)
+        self._pipeline.fit(X_arr, y_arr)
+        self._threshold = 0.5
+        return self
+
+    def fit_hyperparameters(self, X_val: np.ndarray, y_val: np.ndarray) -> "HallucinationProbe":
+        probs = self.predict_proba(self._as_2d_float(X_val))[:, 1]
+        self._threshold = self._best_threshold(probs, np.asarray(y_val).astype(int))
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Predict binary labels for feature vectors.
-
-        Uses the decision threshold in ``self._threshold`` (default ``0.5``;
-        updated by ``fit_hyperparameters``).
-
-        Args:
-            X: Feature matrix of shape ``(n_samples, feature_dim)``.
-
-        Returns:
-            Integer array of shape ``(n_samples,)`` with values in ``{0, 1}``.
-        """
         return (self.predict_proba(X)[:, 1] >= self._threshold).astype(int)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Return class probability estimates.
+        if self._pipeline is None:
+            raise RuntimeError("Probe is not fitted yet. Call fit() before predict_proba().")
 
-        Args:
-            X: Feature matrix of shape ``(n_samples, feature_dim)``.
-
-        Returns:
-            Array of shape ``(n_samples, 2)`` where column 1 contains the
-            estimated probability of the hallucinated class (label 1).
-            Used to compute AUROC.
-        """
-        X_scaled = self._scaler.transform(X)
-        X_t = torch.from_numpy(X_scaled).float()
-        with torch.no_grad():
-            logits = self(X_t)
-            prob_pos = torch.sigmoid(logits).numpy()
+        X_arr = self._as_2d_float(X)
+        probs = self._pipeline.predict_proba(X_arr)
+        classes = list(self._pipeline.classes_)
+        pos_idx = classes.index(1)
+        prob_pos = np.clip(probs[:, pos_idx], 0.0, 1.0)
         return np.stack([1.0 - prob_pos, prob_pos], axis=1)
-
