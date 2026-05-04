@@ -87,6 +87,25 @@ Interpretation:
 - Overfitting gap is moderate and smaller than in H1 peak (`91.68% train`).
 - This is the best documented accuracy in the current repository state.
 
+### Synthetic Data Ablation (Train-fold augmentation only)
+
+Settings:
+- `AUGMENT_TARGET_RATIO=1.0`
+- `JITTER_STD=0.02`
+- `SMOTE_NEIGHBORS=5`
+
+| Mode | Avg Train Acc | Avg Val AUROC | Avg Test Acc | Avg Test F1 | Avg Test AUROC | Delta Test Acc vs baseline | Delta Test AUROC vs baseline |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `none` (baseline) | 76.08% | 75.34% | 73.73% | 82.79% | 74.12% | `+0.00 pp` | `+0.00 pp` |
+| `jitter` | 79.07% | 76.44% | 71.99% | 80.27% | 73.49% | `-1.74 pp` | `-0.63 pp` |
+| `smote` | 79.07% | 76.44% | 71.99% | 80.27% | 73.49% | `-1.74 pp` | `-0.63 pp` |
+| `smote_jitter` | 78.73% | 74.63% | 72.27% | 81.42% | 72.12% | `-1.45 pp` | `-2.01 pp` |
+
+Conclusion:
+- In this setup, synthetic feature augmentation did **not** improve target test metrics.
+- Best result remains `AUGMENTATION_MODE="none"`.
+- `jitter` and `smote` produced identical aggregate metrics in this batch; rerun once more to verify this is not a run-logging mismatch.
+
 ## Imbalance Handling: Done vs Not Done
 
 Done:
